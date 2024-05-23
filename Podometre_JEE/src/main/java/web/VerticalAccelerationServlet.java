@@ -22,17 +22,38 @@ import org.json.JSONObject;
 @WebServlet("/verticalAcceleration")
 public class VerticalAccelerationServlet extends HttpServlet {
     private static final long serialVersionUID = 1L;
-    private float verticalAcceleration;
-    private float time = 0f;
+    
     private Queue<Float> accelerationBuffer = new LinkedList<>();
+    private String name = "";
+    private int samplingFrequency = 100;  
+    private int fftSize = 1024;           
+    private float time = 0f;
+    private int steps = 0;              
 
-    // Constants for sample rate and FFT size
-    private static final int SAMPLE_RATE = 100;  // Sample rate in Hz
-    private static final int FFT_SIZE = 1024;     // Size of the FFT, choose as a power of two
-    private static final float TIME = FFT_SIZE/SAMPLE_RATE;
     @Override
     protected void doPost(HttpServletRequest request, HttpServletResponse response) throws ServletException, IOException {
-        // Read JSON data from request
+        JSONObject jsonObject = parseRequestToJson(request);
+        updateServiceState(jsonObject);
+        processAccelerationData(jsonObject.getJSONArray("verticalAccelerations"));
+        steps = calculateSteps(accelerationBuffer, time, samplingFrequency, fftSize);
+
+        JSONObject responseJson = createResponseJson();
+        sendResponse(response, responseJson);
+    }
+
+    @Override
+    protected void doGet(HttpServletRequest request, HttpServletResponse response) throws ServletException, IOException {
+
+        JSONObject responseJson = createResponseJson();
+        sendResponse(response, responseJson);
+    }
+
+    /**
+     * @param request Requête HTTP contenant les données JSON
+     * @return JSONObject représentant les données de la requête
+     * @throws IOException En cas d'erreur de lecture de la requête
+     */
+    private JSONObject parseRequestToJson(HttpServletRequest request) throws IOException {
         StringBuilder jsonBuffer = new StringBuilder();
         String line;
         try (BufferedReader reader = request.getReader()) {
@@ -40,135 +61,193 @@ public class VerticalAccelerationServlet extends HttpServlet {
                 jsonBuffer.append(line);
             }
         }
+        return new JSONObject(jsonBuffer.toString());
+    }
 
-        // Parse JSON data
-        String jsonString = jsonBuffer.toString();
-        JSONObject jsonObject = new JSONObject(jsonString);
-        JSONArray verticalAccelerations = jsonObject.getJSONArray("verticalAccelerations");
+    /**
+     * Met à jour l'état du service avec les données reçues
+     * @param jsonObject Objet JSON contenant les nouvelles données
+     */
+    private void updateServiceState(JSONObject jsonObject) {
         time = jsonObject.getFloat("time");
+        samplingFrequency = jsonObject.getInt("samplingFrequency");
+        fftSize = jsonObject.getInt("fftSize");
+        name = jsonObject.getString("name");
+    }
 
-        // Log received data and update buffer for each acceleration
-        //System.out.println("Received time: " + time + " and verticalAccelerations: " + verticalAccelerations);
+    /**
+     * Traite les données d'accélération et met à jour le buffer d'accélération
+     * @param verticalAccelerations Tableau JSON des accélérations verticales
+     */
+    private void processAccelerationData(JSONArray verticalAccelerations) {
+        accelerationBuffer.clear();
         for (int i = 0; i < verticalAccelerations.length(); i++) {
             float acceleration = verticalAccelerations.getFloat(i);
-            updateAccelerationBuffer(acceleration);
+            if (accelerationBuffer.size() >= fftSize) {
+                accelerationBuffer.poll();
+            }
+            accelerationBuffer.add(acceleration);
         }
-
-        // Generate response JSON
-        JSONObject responseJson = new JSONObject();
-        responseJson.put("steps", calculateSteps(time));  // Calculate steps using the full buffer and time
-        responseJson.put("buffer", new JSONArray(accelerationBuffer));
-
-        // Send response
-        response.setContentType("application/json");
-        PrintWriter out = response.getWriter();
-        out.print(responseJson.toString());
-        out.flush();
     }
 
-
-    @Override
-    protected void doGet(HttpServletRequest request, HttpServletResponse response) throws ServletException, IOException {
-        // Serve the latest vertical acceleration
-		/*
-		 * String accelerationParam = request.getParameter("verticalAcceleration"); if
-		 * (accelerationParam != null) { verticalAcceleration =
-		 * Float.parseFloat(accelerationParam);
-		 * 
-		 * // Update acceleration buffer updateAccelerationBuffer(verticalAcceleration);
-		 * }
-		 * 
-		 * // Serve time since the last request String timeParam =
-		 * request.getParameter("time"); if (timeParam != null) { time =
-		 * Float.parseFloat(timeParam); }
-		 * 
-		 * // Log parameters received in GET request
-		 * System.out.println("GET request received with verticalAcceleration: " +
-		 * verticalAcceleration + ", time: " + time);
-		 */
-
-        // Generate response JSON
+    /**
+     * Crée un objet JSON contenant les informations de réponse
+     * @return JSONObject représentant la réponse
+     */
+    private JSONObject createResponseJson() {
         JSONObject responseJson = new JSONObject();
+        responseJson.put("name", name);
+        responseJson.put("samplingFrequency", samplingFrequency);
+        responseJson.put("fftSize", fftSize);
         responseJson.put("time", time);
-        responseJson.put("steps", calculateSteps(time));
-        responseJson.put("buffer", new JSONArray(accelerationBuffer));
+        responseJson.put("steps", steps);
+        responseJson.put("verticalAccelerationBuffer", new JSONArray(accelerationBuffer));
+        return responseJson;
+    }
 
-        // Send response
+    /**
+     * Envoie la réponse au client
+     * @param response Réponse HTTP
+     * @param responseJson Objet JSON à envoyer dans la réponse
+     * @throws IOException En cas d'erreur lors de l'envoi de la réponse
+     */
+    private void sendResponse(HttpServletResponse response, JSONObject responseJson) throws IOException {
         response.setContentType("application/json");
         PrintWriter out = response.getWriter();
         out.print(responseJson.toString());
         out.flush();
     }
 
-    private void updateAccelerationBuffer(float newAcceleration) {
-        if (accelerationBuffer.size() >= FFT_SIZE) {
-            accelerationBuffer.poll();
-        }
-        accelerationBuffer.add(newAcceleration);
-        //System.out.println("Updated accelerationBuffer: " + accelerationBuffer);
-    }
-
-    private int calculateSteps(float time) {
-        if (accelerationBuffer.size() != FFT_SIZE) {
+    /**
+     * Calcule le nombre de pas à partir des données d'accélération
+     * @param accelerationBuffer Buffer contenant les accélérations
+     * @param time Temps écoulé
+     * @param sampleRate Taux d'échantillonnage en Hz
+     * @param fftSize Taille de la FFT
+     * @return Nombre de pas calculé
+     */
+    private int calculateSteps(Queue<Float> accelerationBuffer, float time, int sampleRate, int fftSize) {
+        if (accelerationBuffer.size() < fftSize) {
             return 0;
         }
+
         float[] accelArray = convertQueueToArray(accelerationBuffer);
-        //System.out.println("Acceleration array for FFT: " + java.util.Arrays.toString(accelArray));
-
-        double[] fftResult = performFFT(accelArray);
-        //System.out.println("FFT result magnitudes: " + java.util.Arrays.toString(fftResult));
-
-        float fundamentalFrequency = findFundamentalFrequency(fftResult);
-        System.out.println("Calculated fundamental frequency: " + fundamentalFrequency);
-        System.out.println("Time : " + time);
-        float cadence = fundamentalFrequency;  // steps per second
-        int steps = (int) (cadence * TIME);
-        System.out.println("Calculated steps: " + steps);
-        System.out.println("---------------------");
-        
-        return steps;
+        removeDCComponent(accelArray);
+        double[] magnitudes = performFFT(accelArray);
+        int maxIndex = findMaxMagnitudeIndex(magnitudes, sampleRate, fftSize);
+        return computeSteps(maxIndex, sampleRate, fftSize, time);
     }
 
-    private float[] convertQueueToArray(Queue<Float> queue) {
-        float[] array = new float[queue.size()];
+    /**
+     * Convertit le buffer d'accélération en tableau
+     * @param buffer Buffer de données d'accélération
+     * @return Tableau de données d'accélération
+     */
+    private float[] convertQueueToArray(Queue<Float> buffer) {
+        float[] array = new float[buffer.size()];
         int index = 0;
-        for (Float f : queue) {
-            array[index++] = (f != null ? f : 0.0f);
+        for (Float value : buffer) {
+            array[index++] = (value != null ? value : 0.0f);
         }
         return array;
     }
 
+    /**
+     * Supprime la composante continue (DC) des données
+     * @param data Tableau de données d'accélération
+     */
+    private void removeDCComponent(float[] data) {
+        double mean = calculateMean(data);
+        for (int i = 0; i < data.length; i++) {
+            data[i] -= mean;
+        }
+    }
+
+    /**
+     * Effectue la FFT sur les données d'entrée
+     * @param input Tableau de données d'entrée
+     * @return Tableau de magnitudes des fréquences
+     */
     private double[] performFFT(float[] input) {
+        // Initialiser l'objet FastFourierTransformer avec la normalisation standard
         FastFourierTransformer fft = new FastFourierTransformer(DftNormalization.STANDARD);
+        
+        // Convertir le tableau d'entrée en double
         double[] inputDouble = new double[input.length];
         for (int i = 0; i < input.length; i++) {
             inputDouble[i] = input[i];
         }
+        
+        // Effectuer la transformation FFT avant sur le tableau d'entrée
         Complex[] complexResult = fft.transform(inputDouble, TransformType.FORWARD);
-        double[] magnitudes = new double[complexResult.length / 2];  // Use half because of symmetry in FFT output
+        
+        // Extraire les magnitudes des fréquences (utiliser la moitié de la sortie FFT à cause de la symétrie)
+        double[] magnitudes = new double[complexResult.length / 2];
         for (int i = 0; i < magnitudes.length; i++) {
             magnitudes[i] = complexResult[i].abs();
         }
         return magnitudes;
     }
 
-    private float findFundamentalFrequency(double[] magnitudes) {
+    /**
+     * Trouve l'indice de la magnitude maximale dans le tableau de magnitudes
+     * @param magnitudes Tableau de magnitudes des fréquences
+     * @param sampleRate Taux d'échantillonnage en Hz
+     * @param fftSize Taille de la FFT
+     * @return Indice de la magnitude maximale
+     */
+    private int findMaxMagnitudeIndex(double[] magnitudes, int sampleRate, int fftSize) {
         int maxIndex = -1;
         double maxMagnitude = Double.NEGATIVE_INFINITY;
-        // Skip the DC component (index 0) and find the index with the maximum magnitude
-        for (int i = 1; i < magnitudes.length; i++) {
+        
+        // Ignorer les fréquences inférieures à 1 Hz et supérieures à 3 Hz
+        int minIndex = (int) Math.ceil(1.0 * fftSize / sampleRate);
+        int maxIndexLimit = (int) Math.floor(3.0 * fftSize / sampleRate);
+        for (int i = minIndex; i <= maxIndexLimit; i++) {
             if (magnitudes[i] > maxMagnitude) {
                 maxMagnitude = magnitudes[i];
                 maxIndex = i;
             }
         }
-        System.out.println("Max index : " + maxIndex);
-        // Calculate the fundamental frequency based on the index and sample rate
-        float fundamentalFrequency = -1.0f;
-        if (maxIndex != -1) {
-            fundamentalFrequency =(float) maxIndex * SAMPLE_RATE / FFT_SIZE;
-        }
+        
+        // Imprimer les informations de débogage
+        System.out.println("Indice maximal: " + maxIndex);
+        System.out.println("Magnitude maximale: " + maxMagnitude);
+        
+        return maxIndex;
+    }
 
-        return fundamentalFrequency;
+    /**
+     * Calcule le nombre de pas à partir de la fréquence fondamentale
+     * @param maxIndex Indice de la magnitude maximale
+     * @param sampleRate Taux d'échantillonnage en Hz
+     * @param fftSize Taille de la FFT
+     * @param time Temps écoulé
+     * @return Nombre de pas calculé
+     */
+    private int computeSteps(int maxIndex, int sampleRate, int fftSize, float time) {
+        // Calculer la fréquence fondamentale à partir de l'indice et du taux d'échantillonnage
+        float fundamentalFrequency = (float) maxIndex * sampleRate / fftSize;
+        System.out.println("Fréquence fondamentale: " + fundamentalFrequency);
+        
+        // Calculer la cadence (nombre de pas par seconde) et le nombre de pas total
+        float cadence = fundamentalFrequency;
+        int calculatedSteps = (int) (cadence * time);
+        System.out.println("Nombre de pas calculé: " + calculatedSteps);
+        
+        return calculatedSteps;
+    }
+
+    /**
+     * Calcule la moyenne des données
+     * @param data Tableau de données
+     * @return Moyenne des données
+     */
+    private double calculateMean(float[] data) {
+        double sum = 0;
+        for (float value : data) {
+            sum += value;
+        }
+        return sum / data.length;
     }
 }
